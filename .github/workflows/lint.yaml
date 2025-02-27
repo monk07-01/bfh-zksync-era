@@ -5,9 +5,9 @@ on:
   merge_group:
 
 
-#concurrency:
-#  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-#  cancel-in-progress: true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -40,9 +40,9 @@ jobs:
 #      - name: Rust unit tests
 #        run: zkstack dev test rust
 #
-#      - name: Run benchmarks
-#        working-directory: core
-#        run: cargo test --package vm-benchmark --bench oneshot --bench batch
+##      - name: Run benchmarks
+##        working-directory: core
+##        run: cargo test --package vm-benchmark --bench oneshot --bench batch
 #
 #      - name: Show sccache stats
 #        run: sccache --show-stats
@@ -134,8 +134,10 @@ jobs:
   integration-tests:
     runs-on: matterlabs-ci-runner-ultra-performance
     env:
-      RUN_CONTRACT_VERIFICATION_TEST: false
+      RUN_CONTRACT_VERIFICATION_TEST: true
       ZKSYNC_HOME: ${{ github.workspace }}
+      L1_RPC_URL: "http://localhost:8545"
+      SERVER_DB_URL: "postgres://postgres:notsecurepassword@localhost:5432"
     strategy:
       # ----------------------------------------------
       # Note, that while the contracts do support gateway chain
@@ -163,7 +165,7 @@ jobs:
       - name: Start services
         run: docker compose up --wait
 
-      - name: Create log directories
+      - name: Set up logs directories
         run: |
           LOG_DIRS=(
             "SERVER_LOGS_DIR=logs/server"
@@ -175,193 +177,13 @@ jobs:
             "FEES_LOGS_DIR=logs/fees"
             "REVERT_LOGS_DIR=logs/revert"
           )
-          # Create directories and export environment variables
-          for entry in "${LOG_DIRS[@]}"; do
-            mkdir -p "${entry#*=}"
-            echo "${entry}" >> "${GITHUB_ENV}"
+          for DIR in "${LOG_DIRS[@]}"; do
+            mkdir -p "${DIR#*=}"
+            echo "${DIR}" >> "${GITHUB_ENV}"
           done
 
-      - name: Initialize ecosystem
-        run: |
-          zkstack ecosystem init --skip-contract-compilation-override=true \
-            --deploy-paymaster --deploy-erc20 \
-            --deploy-ecosystem --l1-rpc-url=http://localhost:8545 \
-            --server-db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --server-db-name=zksync_server_localhost_era \
-            --ignore-prerequisites --verbose \
-            --observability=false
-
-      - name: Read Custom Token address
-        run: |
-          CUSTOM_TOKEN_ADDRESS=$(
-            awk -F": " '/tokens:/ {found_tokens=1} found_tokens && \
-            /DAI:/ {found_dai=1} found_dai && \
-            /address:/ {print $2; exit}' ./configs/erc20.yaml
-          )
-          echo "CUSTOM_TOKEN_ADDRESS=${CUSTOM_TOKEN_ADDRESS}" >> "${GITHUB_ENV}"
-
-      - name: Create and initialize Validium chain
-        run: |
-          zkstack chain create \
-            --chain-name validium \
-            --chain-id sequential \
-            --prover-mode no-proofs \
-            --wallet-creation localhost \
-            --l1-batch-commit-data-generator-mode validium \
-            --base-token-address 0x0000000000000000000000000000000000000001 \
-            --base-token-price-nominator 1 \
-            --base-token-price-denominator 1 \
-            --set-as-default false \
-            --ignore-prerequisites \
-            --evm-emulator false
-
-          zkstack chain init \
-            --deploy-paymaster \
-            --l1-rpc-url=http://localhost:8545 \
-            --server-db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --server-db-name=zksync_server_localhost_validium \
-            --chain validium \
-            --validium-type no-da
-
-      - name: Create and initialize chain with Custom Token
-        run: |
-          zkstack chain create \
-            --chain-name custom_token \
-            --chain-id sequential \
-            --prover-mode no-proofs \
-            --wallet-creation localhost \
-            --l1-batch-commit-data-generator-mode rollup \
-            --base-token-address ${{ env.CUSTOM_TOKEN_ADDRESS }} \
-            --base-token-price-nominator 314 \
-            --base-token-price-denominator 1000 \
-            --set-as-default false \
-            --ignore-prerequisites \
-            --evm-emulator false
-
-          zkstack chain init \
-            --deploy-paymaster \
-            --l1-rpc-url=http://localhost:8545 \
-            --server-db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --server-db-name=zksync_server_localhost_custom_token \
-            --chain custom_token \
-            --validium-type no-da
-
-      - name: Create and register chain with transactions signed "offline"
-        run: |
-          zkstack chain create \
-            --chain-name offline_chain \
-            --chain-id sequential \
-            --prover-mode no-proofs \
-            --wallet-creation localhost \
-            --l1-batch-commit-data-generator-mode rollup \
-            --base-token-address 0x0000000000000000000000000000000000000001 \
-            --base-token-price-nominator 1 \
-            --base-token-price-denominator 1 \
-            --set-as-default false \
-            --ignore-prerequisites \
-            --evm-emulator false
-
-          zkstack chain build-transactions --chain offline_chain --l1-rpc-url http://127.0.0.1:8545
-
-          governor_pk=$(awk '/governor:/ {flag=1} flag && /private_key:/ {print $2; exit}' ./configs/wallets.yaml)
-
-          zkstack dev send-transactions \
-            --file ./transactions/chain/offline_chain/register-zk-chain-txns.json \
-            --l1-rpc-url http://127.0.0.1:8545 \
-            --private-key ${governor_pk}
-
-          bridge_hub=$(awk '/bridgehub_proxy_addr/ {print $2}' ./configs/contracts.yaml)
-          chain_id=$(awk '/chain_id:/ {print $2}' ./chains/offline_chain/ZkStack.yaml)
-
-          hyperchain_output=$(cast call $bridge_hub "getHyperchain(uint256)" $chain_id)
-
-          if [[ $hyperchain_output == 0x* && ${#hyperchain_output} -eq 66 ]]; then
-            echo "Chain successfully registered: $hyperchain_output"
-          else
-            echo "Failed to register chain: $hyperchain_output"
-            exit 1
-          fi
-
-      - name: Create and initialize Consensus chain
-        run: |
-          zkstack chain create \
-            --chain-name consensus \
-            --chain-id sequential \
-            --prover-mode no-proofs \
-            --wallet-creation localhost \
-            --l1-batch-commit-data-generator-mode validium \
-            --base-token-address ${{ env.CUSTOM_TOKEN_ADDRESS }} \
-            --base-token-price-nominator 314 \
-            --base-token-price-denominator 1000 \
-            --set-as-default false \
-            --ignore-prerequisites \
-            --evm-emulator false
-
-          zkstack chain init \
-            --deploy-paymaster \
-            --l1-rpc-url=http://localhost:8545 \
-            --server-db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --server-db-name=zksync_server_localhost_consensus \
-            --chain consensus \
-            --validium-type no-da
-
-      - name: Export chain list to environment variable
-        run: |
-          CHAINS="era,validium,custom_token,consensus"
-          echo "CHAINS=${CHAINS}" >> $GITHUB_ENV
-
-      # ----------------------------------------------------------------
-      #  Only create/initialize the gateway chain *if* use_gateway_chain=WITH_GATEWAY
-      # ----------------------------------------------------------------
-      - name: Initialize gateway chain
-        if: matrix.use_gateway_chain == 'WITH_GATEWAY'
-        run: |
-          zkstack chain create \
-            --chain-name gateway \
-            --chain-id 505 \
-            --prover-mode no-proofs \
-            --wallet-creation localhost \
-            --l1-batch-commit-data-generator-mode rollup \
-            --base-token-address 0x0000000000000000000000000000000000000001 \
-            --base-token-price-nominator 1 \
-            --base-token-price-denominator 1 \
-            --set-as-default false \
-            --ignore-prerequisites \
-            --evm-emulator false
-
-          zkstack chain init \
-            --deploy-paymaster \
-            --l1-rpc-url=http://localhost:8545 \
-            --server-db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --server-db-name=zksync_server_localhost_gateway \
-            --chain gateway \
-            --validium-type no-da
-
-          zkstack chain convert-to-gateway --chain gateway --ignore-prerequisites
-
-      - name: Run gateway
-        if: matrix.use_gateway_chain == 'WITH_GATEWAY'
-        run: |
-          zkstack server --ignore-prerequisites --chain gateway &> ${{ env.SERVER_LOGS_DIR }}/gateway.log &
-          zkstack server wait --ignore-prerequisites --verbose --chain gateway
-
-      - name: Migrate chains to gateway
-        if: matrix.use_gateway_chain == 'WITH_GATEWAY'
-        run: |
-          zkstack chain migrate-to-gateway --chain era --gateway-chain-name gateway
-          zkstack chain migrate-to-gateway --chain validium --gateway-chain-name gateway
-          zkstack chain migrate-to-gateway --chain custom_token --gateway-chain-name gateway
-          zkstack chain migrate-to-gateway --chain consensus --gateway-chain-name gateway
-
-      - name: Migrate back era
-        if: matrix.use_gateway_chain == 'WITH_GATEWAY'
-        run: |
-          zkstack chain migrate-from-gateway --chain era --gateway-chain-name gateway
-
-      - name: Migrate to gateway again
-        if: matrix.use_gateway_chain == 'WITH_GATEWAY'
-        run: |
-          zkstack chain migrate-to-gateway --chain era --gateway-chain-name gateway
+      - name: Initialize chains
+        run: ./.github/scripts/init_chains.sh "${{ matrix.use_gateway_chain }}"
 
       - name: Build test dependencies
         run: zkstack dev test build
@@ -380,83 +202,87 @@ jobs:
 
       - name: Run servers
         run: |
-          # Override config for part of chains to test the default config as well
-          zkstack dev config-writer --path etc/env/file_based/overrides/tests/integration.yaml --chain era
-          zkstack dev config-writer --path etc/env/file_based/overrides/tests/integration.yaml --chain validium
-
-          zkstack server --ignore-prerequisites --chain era &> ${{ env.SERVER_LOGS_DIR }}/rollup.log &
-          zkstack server --ignore-prerequisites --chain validium &> ${{ env.SERVER_LOGS_DIR }}/validium.log &
-          zkstack server --ignore-prerequisites --chain custom_token &> ${{ env.SERVER_LOGS_DIR }}/custom_token.log &
-          zkstack server --ignore-prerequisites --chain consensus \
-            --components=api,tree,eth,state_keeper,housekeeper,commitment_generator,vm_runner_protective_reads,vm_runner_bwip,vm_playground,da_dispatcher,consensus \
-            &> ${{ env.SERVER_LOGS_DIR }}/consensus.log &
-
-          zkstack server wait --ignore-prerequisites --verbose --chain era
-          zkstack server wait --ignore-prerequisites --verbose --chain validium
-          zkstack server wait --ignore-prerequisites --verbose --chain custom_token
-          zkstack server wait --ignore-prerequisites --verbose --chain consensus
+          for chain in era validium; do
+            zkstack dev config-writer --path etc/env/file_based/overrides/tests/integration.yaml --chain "${chain}"
+          done
+          for chain in era validium custom_token consensus; do
+            log_file="${SERVER_LOGS_DIR}/${chain}.log"
+            if [[ "${chain}" == "consensus" ]]; then
+              components="--components=api,tree,eth,state_keeper,housekeeper,commitment_generator,vm_runner_protective_reads,vm_runner_bwip,vm_playground,da_dispatcher,consensus"
+            else
+              components=""
+            fi
+            zkstack server --ignore-prerequisites --chain "${chain}" $components &> "$log_file" &
+          done
+          for chain in era validium custom_token consensus; do
+            zkstack server wait --ignore-prerequisites --verbose --chain "${chain}"
+          done
 
       - name: Set up attester committee for the consensus chain
         run: |
           zkstack consensus wait-for-registry --ignore-prerequisites --verbose --chain consensus
-          zkstack consensus set-attester-committee --chain consensus --ignore-prerequisites --verbose --from-genesis &> ${{ env.INTEGRATION_TESTS_LOGS_DIR }}/consensus.log
+          zkstack consensus set-attester-committee --chain consensus \
+            --ignore-prerequisites --verbose --from-genesis &> ${INTEGRATION_TESTS_LOGS_DIR}/consensus.log
 
       - name: Run integration tests
         run: |
-          ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites" ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
+          ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites" \
+            ${CHAINS} ${INTEGRATION_TESTS_LOGS_DIR}
 
       - name: Repeat integration tests on push to main to check for flakiness
-        if: ${{ (steps.condition.outputs.should_run == 'true' && github.ref == 'refs/heads/main') }}
+        if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           for i in {1..10}; do
             echo "Iteration $i"
             mkdir -p ${{ env.INTEGRATION_TESTS_LOGS_DIR }}/$i
-            ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites" ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}/$i
+            ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites" \
+              ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}/$i
           done
 
       - name: Init external nodes
-        run: |
-          GATEWAY_RPC_URL="${{ matrix.use_gateway_chain == 'WITH_GATEWAY' && '--gateway-rpc-url=http://localhost:3550' || '' }}"
-
-          zkstack external-node configs --db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --db-name=zksync_en_localhost_era_rollup --l1-rpc-url=http://localhost:8545 $GATEWAY_RPC_URL --chain era
-          zkstack external-node init --ignore-prerequisites --chain era
-
-          zkstack external-node configs --db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --db-name=zksync_en_localhost_era_validium1 --l1-rpc-url=http://localhost:8545 $GATEWAY_RPC_URL --chain validium
-          zkstack external-node init --ignore-prerequisites --chain validium
-
-          zkstack external-node configs --db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --db-name=zksync_en_localhost_era_custom_token --l1-rpc-url=http://localhost:8545 $GATEWAY_RPC_URL --chain custom_token
-          zkstack external-node init --ignore-prerequisites --chain custom_token
-
-          zkstack external-node configs --db-url=postgres://postgres:notsecurepassword@localhost:5432 \
-            --db-name=zksync_en_localhost_era_consensus --l1-rpc-url=http://localhost:8545 $GATEWAY_RPC_URL --chain consensus
-          zkstack external-node init --ignore-prerequisites --chain consensus
+        run: |          
+          if [[ "${{ matrix.use_gateway_chain }}" == "WITH_GATEWAY" ]]; then
+            GATEWAY_RPC_URL="--gateway-rpc-url=http://localhost:3550"
+          fi
+          chains=("era" "validium" "custom_token" "consensus")
+          for chain in "${chains[@]}"; do
+            zkstack external-node configs --chain "${chain}" \
+              --db-url="${SERVER_DB_URL}" \
+              --db-name="zksync_en_localhost_${chain}" \
+              --l1-rpc-url="${L1_RPC_URL}" ${GATEWAY_RPC_URL}
+            zkstack external-node init --ignore-prerequisites --chain "${chain}"
+          done
 
       - name: Run recovery tests (from snapshot)
         run: |
-          ./bin/run_on_all_chains.sh "zkstack dev test recovery --snapshot --no-deps --ignore-prerequisites --verbose" ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
+          ./bin/run_on_all_chains.sh "zkstack dev test recovery --snapshot --no-deps --ignore-prerequisites --verbose" \
+              ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
 
       - name: Run recovery tests (from genesis)
         run: |
-          ./bin/run_on_all_chains.sh "zkstack dev test recovery --no-deps --no-kill --ignore-prerequisites --verbose" ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
+          ./bin/run_on_all_chains.sh "zkstack dev test recovery --no-deps --no-kill --ignore-prerequisites --verbose" \
+            ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
 
       - name: Run external nodes
         run: |
-          zkstack external-node run --ignore-prerequisites --chain era &> ${{ env.EXTERNAL_NODE_LOGS_DIR }}/rollup.log &
-          zkstack external-node run --ignore-prerequisites --chain validium &> ${{ env.EXTERNAL_NODE_LOGS_DIR }}/validium.log &
-          zkstack external-node run --ignore-prerequisites --chain custom_token &> ${{ env.EXTERNAL_NODE_LOGS_DIR }}/custom_token.log &
-          zkstack external-node run --ignore-prerequisites --chain consensus --enable-consensus &> ${{ env.EXTERNAL_NODE_LOGS_DIR }}/consensus.log &
-
-          zkstack external-node wait --ignore-prerequisites --verbose --chain era
-          zkstack external-node wait --ignore-prerequisites --verbose --chain validium
-          zkstack external-node wait --ignore-prerequisites --verbose --chain custom_token
-          zkstack external-node wait --ignore-prerequisites --verbose --chain consensus
+          declare -A chain_options=(
+            [era]=""
+            [validium]="--components all,da_fetcher"
+            [custom_token]=""
+            [consensus]="--enable-consensus"
+          )
+          for chain in "${!chain_options[@]}"; do
+            log_file="${EXTERNAL_NODE_LOGS_DIR}/${chain}.log"
+            zkstack external-node run --ignore-prerequisites --chain "$chain" ${chain_options[$chain]} &> "$log_file" &
+          done
+          for chain in "${!chain_options[@]}"; do
+            zkstack external-node wait --ignore-prerequisites --verbose --chain "${chain}"
+          done
 
       - name: Run integration tests en
         run: |
-          ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites --external-node" ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
+          ./bin/run_on_all_chains.sh "zkstack dev test integration --no-deps --ignore-prerequisites --external-node" \
+              ${{ env.CHAINS }} ${{ env.INTEGRATION_TESTS_LOGS_DIR }}
 
       - name: Repeat integration tests en on push to main to check for flakiness
         if: ${{ (steps.condition.outputs.should_run == 'true' && github.ref == 'refs/heads/main') }}
@@ -481,7 +307,7 @@ jobs:
           ./bin/run_on_all_chains.sh "zkstack dev test fees --no-deps --no-kill" ${{ env.CHAINS }} ${{ env.FEES_LOGS_DIR }}
 
       - name: Repeat fee projection tests on push to main to check for flakiness
-        if: ${{ (steps.condition.outputs.should_run == 'true' && github.ref == 'refs/heads/main') }}
+        if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           for i in {1..10}; do
             echo "Iteration $i"

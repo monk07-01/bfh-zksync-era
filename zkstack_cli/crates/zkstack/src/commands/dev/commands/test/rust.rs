@@ -64,14 +64,6 @@ pub async fn run(shell: &Shell, args: RustArgs) -> anyhow::Result<()> {
         .env("TEST_PROVER_DATABASE_URL", test_prover_url);
     cmd.run()?;
 
-    // logger::info(MSG_RUN_VM_BENCHMARK);
-    // Cmd::new(cmd!(
-    //     shell,
-    //     "cargo test -p vm-benchmark --bench oneshot --bench batch"
-    // ))
-    // .with_force_run()
-    // .run()?;
-
     logger::outro(MSG_UNIT_TESTS_RUN_SUCCESS);
     Ok(())
 }
