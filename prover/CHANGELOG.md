@@ -1,5 +1,12 @@
 # Changelog
 
+## [19.1.0](https://github.com/matter-labs/zksync-era/compare/prover-v19.0.0...prover-v19.1.0) (2025-03-06)
+
+
+### Features
+
+* Add S3 implementation for object_store ([#3664](https://github.com/matter-labs/zksync-era/issues/3664)) ([a848927](https://github.com/matter-labs/zksync-era/commit/a848927082bfb1b5edcc7d5e4dc33d6f39271953))
+
 ## [19.0.0](https://github.com/matter-labs/zksync-era/compare/prover-v18.0.0...prover-v19.0.0) (2025-03-04)
 
 
